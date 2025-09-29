@@ -10,6 +10,30 @@ const DS_SCOPE    = process.env.DS_SCOPE    || "global";
 const TOPIC_NAME  = process.env.TOPIC_NAME  || "moderation";
 const PUBLIC_KEY  = process.env.DISCORD_PUBLIC_KEY;
 
+// === ACCESS CONTROL (baru) ===
+// Isi di ENV (comma-separated):
+// ALLOWED_ROLE_IDS=111111111111111111,222222222222222222,333333333333333333
+// (opsional) ALLOWED_USER_IDS=444444444444444444,555555555555555555
+const ALLOWED_ROLE_IDS = (process.env.ALLOWED_ROLE_IDS || "")
+  .split(",")
+  .map(s => s.trim())
+  .filter(Boolean);
+const ALLOWED_USER_IDS = (process.env.ALLOWED_USER_IDS || "")
+  .split(",")
+  .map(s => s.trim())
+  .filter(Boolean);
+
+function hasAllowedRole(member) {
+  if (!member) return false;
+  // allow by explicit user whitelist first
+  const userId = member.user?.id;
+  if (userId && ALLOWED_USER_IDS.includes(userId)) return true;
+
+  // then check roles array (guild member)
+  const roles = member.roles || [];
+  return roles.some(rid => ALLOWED_ROLE_IDS.includes(String(rid)));
+}
+
 // ---------- utils ----------
 const te = new TextEncoder();
 
@@ -28,20 +52,24 @@ function ocDS(path, qs) {
   Object.entries(qs || {}).forEach(([k,v]) => u.searchParams.set(k, v));
   return u.toString();
 }
+
 async function dsGet(store, key) {
   const url = ocDS("/datastore/entries/entry", { datastoreName: store, scope: DS_SCOPE, entryKey: key });
   const r = await fetch(url, { headers: { "x-api-key": API_KEY } });
   if (!r.ok) return { ok:false, status:r.status };
   return { ok:true, value: await r.json() };
 }
+
 async function dsSet(store, key, value) {
   const url = ocDS("/datastore/entries/entry", { datastoreName: store, scope: DS_SCOPE, entryKey: key });
   await fetch(url, { method:"POST", headers:{ "x-api-key": API_KEY, "content-type":"application/json" }, body: JSON.stringify(value) });
 }
+
 async function publish(topic, payload) {
   const url = `https://apis.roblox.com/messaging-service/v1/universes/${UNIVERSE_ID}/topics/${encodeURIComponent(topic)}`;
   await fetch(url, { method:"POST", headers:{ "x-api-key": API_KEY, "content-type":"application/json" }, body: JSON.stringify({ message: JSON.stringify(payload) }) }).catch(()=>{});
 }
+
 async function resolveUserId(username) {
   const r = await fetch("https://users.roblox.com/v1/usernames/users", {
     method:"POST", headers:{ "content-type":"application/json" },
@@ -53,11 +81,13 @@ async function resolveUserId(username) {
   if (!id) throw new Error("username not found");
   return Number(id);
 }
+
 async function upsertNameIndex(uid, uname) {
   const lower = String(uname).toLowerCase();
   await dsSet(DS_NAMEIDX, `name:${lower}`, Number(uid));
   await dsSet(DS_NAMEIDX, `user:${uid}`, String(uname));
 }
+
 async function setIndex(uid, on) {
   const cur = await dsGet(DS_INDEX, "INDEX");
   let idx = (cur.ok && typeof cur.value === "object") ? cur.value : {};
@@ -79,6 +109,7 @@ async function banByUsername(uname, reason, moderator) {
   await publish(TOPIC_NAME, { type:"BAN", userId:uid, reason:value.Reason, moderator, ts:new Date().toISOString() });
   return uid;
 }
+
 async function unbanByUsername(uname, moderator) {
   const uid = await resolveUserId(uname);
   const cur = await dsGet(DS_BANS, String(uid));
@@ -90,15 +121,19 @@ async function unbanByUsername(uname, moderator) {
   await upsertNameIndex(uid, uname);
   return uid;
 }
+
 async function kickByUsername(uname, reason, moderator) {
   const uid = await resolveUserId(uname);
   await publish(TOPIC_NAME, { type:"KICK", userId:uid, reason:reason||"", moderator, ts:new Date().toISOString() });
   return uid;
 }
+
 async function checkByUsername(uname) {
   const uid = await resolveUserId(uname);
   const got = await dsGet(DS_BANS, String(uid));
-  if (got.ok && got.value && got.value.Active === true) return { uid, banned:true, reason:got.value.Reason || "(no reason)", by:got.value.ByName || "Moderator" };
+  if (got.ok && got.value && got.value.Active === true) {
+    return { uid, banned:true, reason:got.value.Reason || "(no reason)", by:got.value.ByName || "Moderator" };
+  }
   return { uid, banned:false };
 }
 
@@ -126,6 +161,12 @@ export default async function handler(req, res) {
     const name = body.data?.name;
     const opts = opt(body.data?.options || []);
     const moderator = body.member?.user?.username || "Discord";
+
+    // === ROLE-GATE (baru): hanya role yang diizinkan yang boleh jalan ===
+    if (!hasAllowedRole(body.member)) {
+      res.status(200).json(ephemeral("❌ Kamu tidak punya role yang diizinkan untuk memakai bot ini."));
+      return;
+    }
 
     try {
       if (name === "banname") {
@@ -166,6 +207,7 @@ function getRaw(req) {
     req.on("end", () => resolve(b || "{}"));
   });
 }
+
 function opt(arr) {
   const m = {};
   for (const o of arr) m[o.name] = o.value;
