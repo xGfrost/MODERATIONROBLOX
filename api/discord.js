@@ -3,182 +3,175 @@ import { InteractionType, InteractionResponseType, verifyKey } from 'discord-int
 import fetch from 'node-fetch';
 
 const PUBLIC_KEY = process.env.DISCORD_PUBLIC_KEY;
-const ROBLOX_UNIVERSE_ID = process.env.ROBLOX_UNIVERSE_ID;
-const ROBLOX_API_KEY = process.env.ROBLOX_API_KEY;
-const DS_NAME = process.env.DS_NAME || 'ModerationDatastore';
-const TOPIC_NAME = process.env.TOPIC_NAME || 'moderation';
 
-function jsonRes(res, status, body) {
-  res.status(status).setHeader('Content-Type', 'application/json');
+const ROBLOX_UNIVERSE_ID = process.env.ROBLOX_UNIVERSE_ID;
+const ROBLOX_API_KEY     = process.env.ROBLOX_API_KEY;
+
+const BANS_DS       = process.env.BANS_DS       || 'BANS_V1';
+const BANS_INDEX_DS = process.env.BANS_INDEX_DS || 'BANS_INDEX_V1';
+const NAME_INDEX_DS = process.env.NAME_INDEX_DS || '';        // optional
+const TOPIC_NAME    = process.env.TOPIC_NAME    || 'moderation';
+
+function j(res, status, body) {
+  res.status(status).setHeader('content-type', 'application/json');
   res.send(JSON.stringify(body));
 }
 
 export default async function handler(req, res) {
+  // Health check
+  if (req.method === 'GET') return j(res, 200, { ok: true, route: 'discord' });
   if (req.method !== 'POST') return res.status(405).send('Method Not Allowed');
 
-  // read raw body (needed for verifyKey)
-  const rawBody = await new Promise((resolve, reject) => {
-    let data = '';
-    req.on('data', chunk => data += chunk);
-    req.on('end', () => resolve(data));
-    req.on('error', err => reject(err));
+  // read raw body for signature verification
+  const raw = await new Promise((resolve, reject) => {
+    let d = ''; req.on('data', c => d += c);
+    req.on('end', () => resolve(d)); req.on('error', reject);
   });
 
-  const signature = req.headers['x-signature-ed25519'];
-  const timestamp = req.headers['x-signature-timestamp'];
-
-  // verify signature
+  const sig = req.headers['x-signature-ed25519'];
+  const ts  = req.headers['x-signature-timestamp'];
   try {
-    const valid = verifyKey(rawBody, signature, timestamp, PUBLIC_KEY);
-    if (!valid) return res.status(401).send('Invalid request signature');
-  } catch (err) {
-    console.error('verifyKey err', err);
-    return res.status(401).send('Invalid request signature');
+    if (!verifyKey(raw, sig, ts, PUBLIC_KEY)) return res.status(401).send('Invalid request signature');
+  } catch { return res.status(401).send('Invalid request signature'); }
+
+  const i = JSON.parse(raw);
+
+  if (i.type === InteractionType.PING) {
+    return j(res, 200, { type: InteractionResponseType.PONG });
   }
 
-  let interaction;
-  try {
-    interaction = JSON.parse(rawBody);
-  } catch (err) {
-    console.error('Bad JSON body', err);
-    return res.status(400).send('Bad request');
-  }
+  if (i.type === InteractionType.APPLICATION_COMMAND) {
+    const { name, options = [] } = i.data;
+    const userId = String(options.find(o => o.name === 'userid')?.value || '');
+    const reason = String(options.find(o => o.name === 'reason')?.value || '(no reason)');
+    if (!/^\d+$/.test(userId)) return j(res, 200, { type: 4, data: { content: '❌ Invalid userid' } });
 
-  // handle PING
-  if (interaction.type === InteractionType.PING) {
-    return jsonRes(res, 200, { type: InteractionResponseType.PONG });
-  }
-
-  // handle commands
-  if (interaction.type === InteractionType.APPLICATION_COMMAND) {
-    const { name, options = [] } = interaction.data;
-    const userId = options.find(o => o.name === 'userid')?.value;
-    const reason = options.find(o => o.name === 'reason')?.value || '(no reason)';
-
-    // basic validation
-    if (!userId || !/^\d+$/.test(String(userId))) {
-      return jsonRes(res, 200, { type: 4, data: { content: '❌ Invalid userid' } });
-    }
-
+    const byName = i.member?.user?.username ? `${i.member.user.username}#${i.member.user.discriminator ?? ''}`.replace(/#$/, '') : 'DiscordBot';
     try {
       if (name === 'ban') {
-        const result = await banUser(String(userId), String(reason));
-        return jsonRes(res, 200, { type: 4, data: { content: `🚫 User ${userId} dibanned.\n${result}` } });
+        const out = await banUser(userId, reason, byName);
+        return j(res, 200, { type: 4, data: { content: `🚫 User ${userId} dibanned.\n${out}` } });
       }
-
       if (name === 'unban') {
-        const result = await unbanUser(String(userId));
-        return jsonRes(res, 200, { type: 4, data: { content: `✅ User ${userId} diunban.\n${result}` } });
+        const out = await unbanUser(userId, byName);
+        return j(res, 200, { type: 4, data: { content: `✅ User ${userId} diunban.\n${out}` } });
       }
-
       if (name === 'kick') {
-        const result = await kickUser(String(userId), String(reason));
-        return jsonRes(res, 200, { type: 4, data: { content: `👢 User ${userId} di-kick.\n${result}` } });
+        const out = await kickUser(userId, reason, byName);
+        return j(res, 200, { type: 4, data: { content: `👢 User ${userId} di-kick.\n${out}` } });
       }
-
       if (name === 'check') {
-        const status = await checkBanStatus(String(userId));
-        return jsonRes(res, 200, { type: 4, data: { content: `🔍 Status User ${userId}: ${status}` } });
+        const st = await checkBanStatus(userId);
+        return j(res, 200, { type: 4, data: { content: `🔍 Status User ${userId}: ${st}` } });
       }
-
-      return jsonRes(res, 400, { error: 'Unknown command' });
-    } catch (err) {
-      console.error('command handler error', err);
-      return jsonRes(res, 200, { type: 4, data: { content: `❌ Error: ${String(err).slice(0,300)}` } });
+      return j(res, 400, { error: 'Unknown command' });
+    } catch (e) {
+      return j(res, 200, { type: 4, data: { content: `❌ Error: ${String(e).slice(0, 300)}` } });
     }
   }
 
-  return res.status(400).send('Bad request');
+  res.status(400).send('Bad request');
 }
 
+/* -------- Roblox helpers (BANS_V1 schema) -------- */
 
-// ---------------- Roblox helpers ----------------
-async function robloxPutEntry(key, valueObj) {
-  const url = `https://apis.roblox.com/datastores/v1/universes/${ROBLOX_UNIVERSE_ID}/standard-datastores/${encodeURIComponent(DS_NAME)}/entries/${encodeURIComponent(key)}?scope=global`;
+const baseDS = (ds) =>
+  `https://apis.roblox.com/datastores/v1/universes/${ROBLOX_UNIVERSE_ID}/standard-datastores/${encodeURIComponent(ds)}/entries`;
 
-  const body = JSON.stringify({ value: valueObj });
-
+async function putEntry(ds, key, valueObj) {
+  const url = `${baseDS(ds)}/${encodeURIComponent(key)}?scope=global`;
   const resp = await fetch(url, {
     method: 'PUT',
-    headers: {
-      'x-api-key': ROBLOX_API_KEY,
-      'Content-Type': 'application/json'
-    },
-    body
-  });
-
-  const text = await resp.text();
-  let parsed = null;
-  try { parsed = JSON.parse(text); } catch(_) { /* not JSON */ }
-
-  return { status: resp.status, bodyText: text, body: parsed };
-}
-
-async function robloxGetEntry(key) {
-  const url = `https://apis.roblox.com/datastores/v1/universes/${ROBLOX_UNIVERSE_ID}/standard-datastores/${encodeURIComponent(DS_NAME)}/entries/${encodeURIComponent(key)}?scope=global`;
-  const resp = await fetch(url, {
-    method: 'GET',
-    headers: { 'x-api-key': ROBLOX_API_KEY }
+    headers: { 'x-api-key': ROBLOX_API_KEY, 'content-type': 'application/json' },
+    body: JSON.stringify({ value: valueObj })
   });
   const text = await resp.text();
-  let parsed = null;
-  try { parsed = JSON.parse(text); } catch(_) { /* ignore */ }
-  return { status: resp.status, bodyText: text, body: parsed };
+  return { status: resp.status, text };
 }
 
-async function robloxPublishMessage(messageObj) {
+async function getEntry(ds, key) {
+  const url = `${baseDS(ds)}/${encodeURIComponent(key)}?scope=global`;
+  const resp = await fetch(url, { headers: { 'x-api-key': ROBLOX_API_KEY } });
+  const text = await resp.text();
+  let json = null; try { json = JSON.parse(text); } catch {}
+  return { status: resp.status, text, json };
+}
+
+/* update one-big "INDEX" map: { [useridStr]=true } */
+async function addToIndex(userId) {
+  const got = await getEntry(BANS_INDEX_DS, 'INDEX');
+  let map = {};
+  if (got.status === 200 && got.json && got.json.value) map = got.json.value;
+  map[String(userId)] = true;
+  return putEntry(BANS_INDEX_DS, 'INDEX', map);
+}
+
+async function removeFromIndex(userId) {
+  const got = await getEntry(BANS_INDEX_DS, 'INDEX');
+  let map = {};
+  if (got.status === 200 && got.json && got.json.value) map = got.json.value;
+  delete map[String(userId)];
+  return putEntry(BANS_INDEX_DS, 'INDEX', map);
+}
+
+/* optional name index */
+async function updateNameIndex(userId, byName) {
+  if (!NAME_INDEX_DS) return { status: 204, text: 'skip name index' };
+  const lower = (byName || 'discord').toLowerCase();
+  const r1 = await putEntry(NAME_INDEX_DS, `name:${lower}`, { userId: Number(userId) });
+  const r2 = await putEntry(NAME_INDEX_DS, `user:${userId}`, { latestName: byName });
+  return { status: Math.max(r1.status, r2.status), text: `${r1.status}/${r2.status}` };
+}
+
+async function publishMessage(payload) {
   const url = `https://apis.roblox.com/messaging-service/v1/universes/${ROBLOX_UNIVERSE_ID}/topics/${encodeURIComponent(TOPIC_NAME)}`;
   const resp = await fetch(url, {
     method: 'POST',
-    headers: {
-      'x-api-key': ROBLOX_API_KEY,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({ message: JSON.stringify(messageObj) })
+    headers: { 'x-api-key': ROBLOX_API_KEY, 'content-type': 'application/json' },
+    body: JSON.stringify({ message: JSON.stringify(payload) })
   });
   const text = await resp.text();
-  let parsed = null;
-  try { parsed = JSON.parse(text); } catch(_) {}
-  return { status: resp.status, bodyText: text, body: parsed };
+  return { status: resp.status, text };
 }
 
-// ban
-async function banUser(userId, reason) {
-  const key = `ban_${userId}`;
-  const value = { banned: true, reason, moderator: 'DiscordBot', ts: new Date().toISOString() };
+/* -------- Commands (BANS_V1) -------- */
 
-  const put = await robloxPutEntry(key, value);
-  const pub = await robloxPublishMessage({ type: 'BAN', userId, reason, moderator: 'DiscordBot', ts: new Date().toISOString() });
+async function banUser(userId, reason, byName) {
+  const now = Math.floor(Date.now()/1000);
+  const value = { Active: true, Reason: reason, By: userId, ByName: byName, Time: now };
 
-  return `DataStore: ${put.status} ${put.bodyText ? put.bodyText.slice(0,300) : ''}\nMessaging: ${pub.status} ${pub.bodyText ? pub.bodyText.slice(0,300) : ''}`;
+  const p1 = await putEntry(BANS_DS, userId, value);        // key = "<userId>"
+  const p2 = await addToIndex(userId);                      // update "INDEX" map
+  const p3 = await updateNameIndex(userId, byName);         // optional
+  const p4 = await publishMessage({ type: 'BAN', userId, reason, moderator: byName, ts: new Date().toISOString() });
+
+  return `BANS_V1: ${p1.status}\nINDEX: ${p2.status}\nNAME_IDX: ${p3.status}\nMessaging: ${p4.status}`;
 }
 
-// unban: set banned=false (or you can delete entry using admin key with delete permission)
-async function unbanUser(userId) {
-  const key = `ban_${userId}`;
-  const value = { banned: false, reason: '', moderator: 'DiscordBot', ts: new Date().toISOString() };
+async function unbanUser(userId, byName) {
+  const now = Math.floor(Date.now()/1000);
+  const value = { Active: false, Reason: '', By: userId, ByName: byName, Time: now };
 
-  const put = await robloxPutEntry(key, value);
-  const pub = await robloxPublishMessage({ type: 'UNBAN', userId, reason: '', moderator: 'DiscordBot', ts: new Date().toISOString() });
+  const p1 = await putEntry(BANS_DS, userId, value);
+  const p2 = await removeFromIndex(userId);
+  const p4 = await publishMessage({ type: 'UNBAN', userId, reason: '', moderator: byName, ts: new Date().toISOString() });
 
-  return `DataStore: ${put.status} ${put.bodyText ? put.bodyText.slice(0,300) : ''}\nMessaging: ${pub.status} ${pub.bodyText ? pub.bodyText.slice(0,300) : ''}`;
+  return `BANS_V1: ${p1.status}\nINDEX: ${p2.status}\nMessaging: ${p4.status}`;
 }
 
-// kick
-async function kickUser(userId, reason) {
-  const pub = await robloxPublishMessage({ type: 'KICK', userId, reason, moderator: 'DiscordBot', ts: new Date().toISOString() });
-  return `Messaging: ${pub.status} ${pub.bodyText ? pub.bodyText.slice(0,300) : ''}`;
+async function kickUser(userId, reason, byName) {
+  const p = await publishMessage({ type: 'KICK', userId, reason, moderator: byName, ts: new Date().toISOString() });
+  return `Messaging: ${p.status}`;
 }
 
-// check
 async function checkBanStatus(userId) {
-  const key = `ban_${userId}`;
-  const got = await robloxGetEntry(key);
-  if (got.status === 200 && got.body && got.body.value) {
-    const v = got.body.value;
-    if (v && v.banned) return `BANNED - Reason: ${v.reason || '(no reason)'} | By: ${v.moderator || 'Moderator'}`;
-    return 'Not Banned';
-  }
+  const got = await getEntry(BANS_DS, userId);
   if (got.status === 404) return 'Not Banned (404)';
-  return `Error reading DataStore: ${got.status} ${got.bodyText ? got.bodyText.slice(0,300) : ''}`;
+  if (got.status !== 200) return `Error DS ${got.status}: ${got.text.slice(0,200)}`;
+
+  const v = got.json?.value;
+  if (v && (v.Active === true || v.Active === 'true')) {
+    return `BANNED - Reason: ${v.Reason || '(no reason)'} | By: ${v.ByName || v.By || 'Moderator'} | At: ${v.Time || ''}`;
+  }
+  return 'Not Banned';
 }
