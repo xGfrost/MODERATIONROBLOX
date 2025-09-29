@@ -1,0 +1,13 @@
+{
+  "name": "roblox-moderation-bot",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "register": "node scripts/register-commands.mjs"
+  },
+  "dependencies": {
+    "discord-interactions": "^3.4.0",
+    "dotenv": "^17.2.2",
+    "node-fetch": "^3.3.2"
+  }
+}
