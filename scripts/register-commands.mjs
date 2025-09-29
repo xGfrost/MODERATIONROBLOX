@@ -1,48 +1,47 @@
-import fetch from 'node-fetch';
-import 'dotenv/config';
+// scripts/register-commands.mjs
+import fetch from "node-fetch";
+import "dotenv/config";
 
 const url = `https://discord.com/api/v10/applications/${process.env.DISCORD_APPLICATION_ID}/guilds/${process.env.GUILD_ID}/commands`;
 
 const commands = [
   {
-    name: 'ban',
-    description: 'Ban a Roblox user',
+    name: "banname",
+    description: "Ban a Roblox user by username",
     options: [
-      { name: 'userid', type: 3, description: 'Roblox UserId', required: true },
-      { name: 'reason', type: 3, description: 'Reason for ban', required: false }
+      { name: "username", type: 3, description: "Roblox username", required: true },
+      { name: "reason",   type: 3, description: "Reason for ban", required: false }
     ]
   },
   {
-    name: 'unban',
-    description: 'Unban a Roblox user',
-    options: [{ name: 'userid', type: 3, description: 'Roblox UserId', required: true }]
+    name: "unbanname",
+    description: "Unban a Roblox user by username",
+    options: [{ name: "username", type: 3, description: "Roblox username", required: true }]
   },
   {
-    name: 'kick',
-    description: 'Kick a Roblox user',
+    name: "kickname",
+    description: "Kick a Roblox user by username",
     options: [
-      { name: 'userid', type: 3, description: 'Roblox UserId', required: true },
-      { name: 'reason', type: 3, description: 'Reason for kick', required: false }
+      { name: "username", type: 3, description: "Roblox username", required: true },
+      { name: "reason",   type: 3, description: "Reason (optional)", required: false }
     ]
   },
   {
-    name: 'check',
-    description: 'Check ban status',
-    options: [{ name: 'userid', type: 3, description: 'Roblox UserId', required: true }]
+    name: "checkname",
+    description: "Check ban status by username",
+    options: [{ name: "username", type: 3, description: "Roblox username", required: true }]
   }
 ];
 
 for (const cmd of commands) {
   const res = await fetch(url, {
-    method: 'POST',
+    method: "POST",
     headers: {
-      'Authorization': `Bot ${process.env.DISCORD_BOT_TOKEN}`,
-      'Content-Type': 'application/json'
+      "Authorization": `Bot ${process.env.DISCORD_BOT_TOKEN}`,
+      "Content-Type": "application/json"
     },
     body: JSON.stringify(cmd)
   });
-
   console.log(`Registering ${cmd.name}: ${res.status}`);
-  const data = await res.json();
-  console.log(data);
+  try { console.log(await res.json()); } catch { /* ignore */ }
 }
